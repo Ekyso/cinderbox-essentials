@@ -1,0 +1,86 @@
+name: Publish Cinderbox pack
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish.yml
+      - cinderbox-pack.zip
+      - release.env
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-cinderbox-pack
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify pack archive
+        id: release
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^PACK_VERSION=//p' release.env)"
+          expected_sha256="$(sed -n 's/^PACK_SHA256=//p' release.env)"
+          if ! [[ "$version" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid pack version: $version" >&2
+            exit 1
+          fi
+          if ! [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Invalid pack SHA-256." >&2
+            exit 1
+          fi
+          actual_sha256="$(sha256sum cinderbox-pack.zip | awk '{print $1}')"
+          if [ "$actual_sha256" != "$expected_sha256" ]; then
+            echo "Pack archive SHA-256 does not match." >&2
+            echo "Expected: $expected_sha256" >&2
+            echo "Actual:   $actual_sha256" >&2
+            exit 1
+          fi
+          echo "$actual_sha256  cinderbox-pack.zip" > cinderbox-pack.zip.sha256
+          echo "tag=pack-v$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$actual_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          PACK_SHA256: ${{ steps.release.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists. Import a changed pack to advance the version." >&2
+            exit 1
+          fi
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n\n' \
+            'Compiled mod pack for Cinderbox.' \
+            '## Included' \
+            '- Cinderbox Essentials' \
+            '- CinderTap' \
+            '- LetMeRemap' \
+            '- UI Info Suite 2 Redux' \
+            '- SoManyElements, SoManyToolbars, and SoManyButtons' \
+            '## Verification' \
+            'Pack SHA-256:' \
+            "\`$PACK_SHA256\`" \
+            > "$notes_file"
+          gh release create "$RELEASE_TAG" \
+            cinderbox-pack.zip \
+            cinderbox-pack.zip.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Cinderbox Pack v${RELEASE_TAG##*-v}" \
+            --notes-file "$notes_file" \
+            --prerelease \
+            --latest=false
